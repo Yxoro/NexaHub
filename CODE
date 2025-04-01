@@ -1,0 +1,959 @@
+import sys
+import subprocess
+import json
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QStackedWidget, QTextEdit, QFrame,
+    QScrollArea, QListWidget, QListWidgetItem, QColorDialog,
+    QComboBox, QSlider, QCheckBox, QSystemTrayIcon, QMenu,
+    QToolButton, QMessageBox, QFileDialog, QSizePolicy,
+    QDialog, QDialogButtonBox, QGroupBox, QTabWidget,QStyle,QLineEdit
+)
+from PyQt6.QtGui import (  
+    QIcon, QFont, QColor, QPixmap, QPainter, QPen, QAction,
+    QImage, QPainterPath, QLinearGradient, QBrush, QMovie
+)
+from PyQt6.QtCore import (
+    Qt, QPoint, QSize, QTimer, QPropertyAnimation, pyqtSignal,
+    QDateTime, QRectF
+)
+
+# Configuration
+APP_NAME = "NexaHub"
+APP_VERSION = "3.0"
+APP_ICON = "nexahub_icon.png"
+ADDONS_ICON = "addons_icon.png"
+
+# ==================== ADDONS SYSTEM ====================
+
+class Addon:
+    def __init__(self, name, description, icon, version="1.0"):
+        self.name = name
+        self.description = description
+        self.icon = icon
+        self.version = version
+        self.enabled = False
+    
+    def activate(self):
+        self.enabled = True
+    
+    def deactivate(self):
+        self.enabled = False
+
+class PaintAddon(Addon):
+    def __init__(self):
+        super().__init__(
+            "NexaPaint",
+            "Advanced drawing tool with multiple brushes and colors",
+            "paint_icon.png"
+        )
+        self.drawing = False
+        self.last_point = QPoint()
+        self.pen_color = QColor("#000000")
+        self.pen_width = 3
+        self.current_tool = "pen"
+        self.canvas = QImage(800, 600, QImage.Format.Format_RGB32)
+        self.canvas.fill(Qt.GlobalColor.white)
+    
+    def setup_ui(self, parent):
+        self.parent = parent
+        self.paint_widget = QWidget()
+        layout = QVBoxLayout()
+        
+        # Toolbar
+        toolbar = QHBoxLayout()
+        
+        # Tools
+        self.pen_btn = QPushButton("Pen")
+        self.pen_btn.setCheckable(True)
+        self.pen_btn.setChecked(True)
+        self.pen_btn.clicked.connect(lambda: self.set_tool("pen"))
+        
+        self.brush_btn = QPushButton("Brush")
+        self.brush_btn.setCheckable(True)
+        self.brush_btn.clicked.connect(lambda: self.set_tool("brush"))
+        
+        self.line_btn = QPushButton("Line")
+        self.line_btn.setCheckable(True)
+        self.line_btn.clicked.connect(lambda: self.set_tool("line"))
+        
+        self.rect_btn = QPushButton("Rectangle")
+        self.rect_btn.setCheckable(True)
+        self.rect_btn.clicked.connect(lambda: self.set_tool("rect"))
+        
+        # Color and size
+        self.color_btn = QPushButton("Color")
+        self.color_btn.clicked.connect(self.choose_color)
+        self.color_preview = QLabel()
+        self.color_preview.setFixedSize(20, 20)
+        self.color_preview.setStyleSheet(f"background: {self.pen_color.name()};")
+        
+        self.brush_slider = QSlider(Qt.Orientation.Horizontal)
+        self.brush_slider.setRange(1, 50)
+        self.brush_slider.setValue(self.pen_width)
+        self.brush_slider.valueChanged.connect(self.change_brush_size)
+        
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.clicked.connect(self.clear_canvas)
+        
+        # Add to toolbar
+        toolbar.addWidget(self.pen_btn)
+        toolbar.addWidget(self.brush_btn)
+        toolbar.addWidget(self.line_btn)
+        toolbar.addWidget(self.rect_btn)
+        toolbar.addWidget(self.color_btn)
+        toolbar.addWidget(self.color_preview)
+        toolbar.addWidget(QLabel("Size:"))
+        toolbar.addWidget(self.brush_slider)
+        toolbar.addWidget(self.clear_btn)
+        
+        # Canvas
+        self.canvas_label = QLabel()
+        self.canvas_label.setPixmap(QPixmap.fromImage(self.canvas))
+        self.canvas_label.mousePressEvent = self.mouse_press
+        self.canvas_label.mouseMoveEvent = self.mouse_move
+        self.canvas_label.mouseReleaseEvent = self.mouse_release
+        
+        layout.addLayout(toolbar)
+        layout.addWidget(self.canvas_label)
+        self.paint_widget.setLayout(layout)
+        
+        return self.paint_widget
+    
+    def set_tool(self, tool):
+        self.current_tool = tool
+        self.pen_btn.setChecked(tool == "pen")
+        self.brush_btn.setChecked(tool == "brush")
+        self.line_btn.setChecked(tool == "line")
+        self.rect_btn.setChecked(tool == "rect")
+    
+    def choose_color(self):
+        color = QColorDialog.getColor()
+        if color.isValid():
+            self.pen_color = color
+            self.color_preview.setStyleSheet(f"background: {color.name()};")
+    
+    def clear_canvas(self):
+        self.canvas.fill(Qt.GlobalColor.white)
+        self.canvas_label.setPixmap(QPixmap.fromImage(self.canvas))
+    
+    def change_brush_size(self, size):
+        self.pen_width = size
+    
+    def mouse_press(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drawing = True
+            self.last_point = event.pos()
+            self.start_point = event.pos()
+    
+    def mouse_move(self, event):
+        if self.drawing:
+            painter = QPainter(self.canvas)
+            painter.setPen(QPen(self.pen_color, self.pen_width, 
+                              Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            
+            if self.current_tool in ["pen", "brush"]:
+                painter.drawLine(self.last_point, event.pos())
+                self.last_point = event.pos()
+            elif self.current_tool == "line":
+                temp_canvas = self.canvas.copy()
+                temp_painter = QPainter(temp_canvas)
+                temp_painter.setPen(QPen(self.pen_color, self.pen_width))
+                temp_painter.drawLine(self.start_point, event.pos())
+                temp_painter.end()
+                self.canvas_label.setPixmap(QPixmap.fromImage(temp_canvas))
+            elif self.current_tool == "rect":
+                temp_canvas = self.canvas.copy()
+                temp_painter = QPainter(temp_canvas)
+                temp_painter.setPen(QPen(self.pen_color, self.pen_width))
+                rect = QRectF(self.start_point, event.pos())
+                temp_painter.drawRect(rect)
+                temp_painter.end()
+                self.canvas_label.setPixmap(QPixmap.fromImage(temp_canvas))
+            
+            painter.end()
+            if self.current_tool in ["pen", "brush"]:
+                self.canvas_label.setPixmap(QPixmap.fromImage(self.canvas))
+    
+    def mouse_release(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.drawing:
+            self.drawing = False
+            
+            if self.current_tool in ["line", "rect"]:
+                painter = QPainter(self.canvas)
+                painter.setPen(QPen(self.pen_color, self.pen_width))
+                
+                if self.current_tool == "line":
+                    painter.drawLine(self.start_point, event.pos())
+                elif self.current_tool == "rect":
+                    rect = QRectF(self.start_point, event.pos())
+                    painter.drawRect(rect)
+                
+                painter.end()
+                self.canvas_label.setPixmap(QPixmap.fromImage(self.canvas))
+
+class NotesAddon(Addon):
+    def __init__(self):
+        super().__init__(
+            "NexaNotes", 
+            "Advanced note-taking with rich text and organization",
+            "notes_icon.png",
+            "1.2"
+        )
+        self.notes = {}
+        self.current_note = None
+    
+    def setup_ui(self, parent):
+        self.parent = parent
+        self.notes_widget = QWidget()
+        layout = QHBoxLayout()
+        
+        # Sidebar with note list
+        sidebar = QWidget()
+        sidebar.setFixedWidth(200)
+        sidebar_layout = QVBoxLayout()
+        
+        self.note_list = QListWidget()
+        self.note_list.itemClicked.connect(self.load_note)
+        
+        self.new_note_btn = QPushButton("New Note")
+        self.new_note_btn.clicked.connect(self.new_note)
+        
+        self.delete_note_btn = QPushButton("Delete")
+        self.delete_note_btn.clicked.connect(self.delete_note)
+        
+        sidebar_layout.addWidget(self.new_note_btn)
+        sidebar_layout.addWidget(self.delete_note_btn)
+        sidebar_layout.addWidget(self.note_list)
+        sidebar.setLayout(sidebar_layout)
+        
+        # Note editor
+        self.note_editor = QTextEdit()
+        self.note_editor.setAcceptRichText(True)
+        
+        # Tags and search
+        self.tags_edit = QLineEdit()
+        self.tags_edit.setPlaceholderText("Add tags...")
+        
+        editor_layout = QVBoxLayout()
+        editor_layout.addWidget(self.tags_edit)
+        editor_layout.addWidget(self.note_editor)
+        
+        layout.addWidget(sidebar)
+        layout.addLayout(editor_layout)
+        self.notes_widget.setLayout(layout)
+        
+        self.load_notes()
+        return self.notes_widget
+    
+    def new_note(self):
+        note_id = f"Note_{len(self.notes) + 1}"
+        self.notes[note_id] = {
+            "content": "",
+            "tags": [],
+            "created": QDateTime.currentDateTime().toString()
+        }
+        self.note_list.addItem(note_id)
+        self.note_list.setCurrentRow(self.note_list.count() - 1)
+    
+    def delete_note(self):
+        current = self.note_list.currentItem()
+        if current:
+            del self.notes[current.text()]
+            self.note_list.takeItem(self.note_list.row(current))
+    
+    def load_note(self, item):
+        self.current_note = item.text()
+        note_data = self.notes.get(self.current_note, {})
+        self.note_editor.setHtml(note_data.get("content", ""))
+        self.tags_edit.setText(", ".join(note_data.get("tags", [])))
+    
+    def save_note(self):
+        if self.current_note:
+            self.notes[self.current_note] = {
+                "content": self.note_editor.toHtml(),
+                "tags": [t.strip() for t in self.tags_edit.text().split(",") if t.strip()],
+                "modified": QDateTime.currentDateTime().toString()
+            }
+    
+    def load_notes(self):
+        # In a real app, load from file/database
+        self.notes = {
+            "Welcome": {
+                "content": "<h1>Welcome to NexaNotes!</h1><p>Start writing your notes here...</p>",
+                "tags": ["welcome", "getting-started"],
+                "created": QDateTime.currentDateTime().toString()
+            },
+            "Cheat Sheet": {
+                "content": "<h2>Keyboard Shortcuts</h2><ul><li>Ctrl+B: Bold</li><li>Ctrl+I: Italic</li></ul>",
+                "tags": ["reference", "shortcuts"],
+                "created": QDateTime.currentDateTime().toString()
+            }
+        }
+        self.note_list.clear()
+        self.note_list.addItems(self.notes.keys())
+
+# ==================== ADDONS MANAGER ====================
+
+class AddonsManager:
+    def __init__(self, parent):
+        self.parent = parent
+        self.addons = [
+            PaintAddon(),
+            NotesAddon(),
+            Addon("NexaCalc", "Advanced calculator with scientific functions", "calc_icon.png"),
+            Addon("NexaWeather", "Real-time weather forecasts and alerts", "weather_icon.png"),
+            Addon("NexaTranslate", "Multi-language translation tool", "translate_icon.png"),
+            Addon("NexaMusic", "Music player with playlists", "music_icon.png"),
+            Addon("NexaCode", "Code editor with syntax highlighting", "code_icon.png"),
+            Addon("NexaMail", "Email client with multiple account support", "mail_icon.png"),
+            Addon("NexaTasks", "Task manager with reminders", "tasks_icon.png"),
+            Addon("NexaTerminal", "System terminal emulator", "terminal_icon.png")
+        ]
+        self.active_addons = {}
+    
+    def install_addon(self, addon):
+        if addon.name not in self.active_addons:
+            addon.activate()
+            self.active_addons[addon.name] = addon
+            return True
+        return False
+    
+    def uninstall_addon(self, addon_name):
+        if addon_name in self.active_addons:
+            self.active_addons[addon_name].deactivate()
+            del self.active_addons[addon_name]
+            return True
+        return False
+    
+    def get_addon_ui(self, addon_name):
+        if addon_name in self.active_addons:
+            return self.active_addons[addon_name].setup_ui(self.parent)
+        return None
+
+# ==================== ADDONS STORE ====================
+
+class AddonsStore(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("NexaHub Addons (Beta)")
+        self.setWindowIcon(QIcon(ADDONS_ICON))
+        self.resize(900, 600)
+        
+        self.addons_manager = parent.addons_manager
+        self.init_ui()
+    
+    def init_ui(self):
+        layout = QVBoxLayout()
+        
+        # Header with logo
+        header = QHBoxLayout()
+        logo = QLabel()
+        logo.setPixmap(QIcon(ADDONS_ICON).pixmap(48, 48))
+        title = QLabel("NexaHub Addons Beta")
+        title.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        
+        header.addWidget(logo)
+        header.addWidget(title)
+        header.addStretch()
+        
+        # Addons list
+        self.addons_list = QListWidget()
+        self.addons_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.addons_list.setIconSize(QSize(64, 64))
+        self.addons_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.addons_list.setMovement(QListWidget.Movement.Static)
+        self.addons_list.itemClicked.connect(self.show_addon_details)
+        
+        # Details panel
+        self.details_panel = QWidget()
+        details_layout = QVBoxLayout()
+        
+        self.addon_name = QLabel()
+        self.addon_name.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        
+        self.addon_version = QLabel()
+        self.addon_version.setStyleSheet("color: #666;")
+        
+        self.addon_desc = QTextEdit()
+        self.addon_desc.setReadOnly(True)
+        
+        self.install_btn = QPushButton("Install")
+        self.install_btn.clicked.connect(self.toggle_addon)
+        
+        details_layout.addWidget(self.addon_name)
+        details_layout.addWidget(self.addon_version)
+        details_layout.addWidget(self.addon_desc)
+        details_layout.addWidget(self.install_btn)
+        details_layout.addStretch()
+        
+        self.details_panel.setLayout(details_layout)
+        
+        # Main layout
+        main_layout = QHBoxLayout()
+        main_layout.addWidget(self.addons_list, 2)
+        main_layout.addWidget(self.details_panel, 1)
+        
+        layout.addLayout(header)
+        layout.addLayout(main_layout)
+        self.setLayout(layout)
+        
+        self.load_addons()
+    
+    def load_addons(self):
+        self.addons_list.clear()
+        for addon in self.addons_manager.addons:
+            item = QListWidgetItem(QIcon(addon.icon), addon.name)
+            item.setData(Qt.ItemDataRole.UserRole, addon)
+            self.addons_list.addItem(item)
+    
+    def show_addon_details(self, item):
+        addon = item.data(Qt.ItemDataRole.UserRole)
+        self.addon_name.setText(addon.name)
+        self.addon_version.setText(f"Version: {addon.version}")
+        self.addon_desc.setText(addon.description)
+        
+        if addon.name in self.addons_manager.active_addons:
+            self.install_btn.setText("Uninstall")
+            self.install_btn.setStyleSheet("background: #f44336;")
+        else:
+            self.install_btn.setText("Install")
+            self.install_btn.setStyleSheet("background: #4CAF50;")
+    
+    def toggle_addon(self):
+        current = self.addons_list.currentItem()
+        if current:
+            addon = current.data(Qt.ItemDataRole.UserRole)
+            if addon.name in self.addons_manager.active_addons:
+                self.addons_manager.uninstall_addon(addon.name)
+            else:
+                self.addons_manager.install_addon(addon)
+            self.show_addon_details(current)
+            self.parent.update_addons_menu()
+
+# ==================== MAIN APPLICATION ====================
+
+class NexaHub(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
+        self.setWindowIcon(QIcon(APP_ICON))
+        self.setGeometry(300, 150, 1000, 700)
+        
+        # Initialize systems
+        self.addons_manager = AddonsManager(self)
+        self.addons_ui = {}
+        self.notification_system = self.setup_notifications()
+        
+        # Setup UI
+        self.init_ui()
+        
+        # Install some addons by default
+        self.addons_manager.install_addon(self.addons_manager.addons[0])  # Paint
+        self.addons_manager.install_addon(self.addons_manager.addons[1])  # Notes
+        
+        # Update UI
+        self.update_addons_menu()
+    
+    def setup_notifications(self):
+        tray = QSystemTrayIcon(self)
+        tray.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
+        
+        menu = QMenu()
+        show_action = QAction("Show", self)
+        show_action.triggered.connect(self.show)
+        menu.addAction(show_action)
+        
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self.close)
+        menu.addAction(exit_action)
+        
+        tray.setContextMenu(menu)
+        tray.show()
+        
+        def show_notification(title, message):
+            tray.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 3000)
+        
+        return show_notification
+    
+    def init_ui(self):
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        
+        self.main_layout = QHBoxLayout()
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.central_widget.setLayout(self.main_layout)
+        
+        self.create_sidebar()
+        self.create_content_area()
+        
+        self.main_layout.addWidget(self.content_area, 1)
+    
+    def create_sidebar(self):
+        sidebar = QWidget()
+        sidebar.setFixedWidth(220)
+        sidebar.setObjectName("sidebar")
+        
+        layout = QVBoxLayout()
+        layout.setSpacing(5)
+        layout.setContentsMargins(10, 20, 10, 20)
+        
+        # Logo
+        logo_layout = QHBoxLayout()
+        logo_icon = QLabel()
+        logo_icon.setPixmap(QIcon(APP_ICON).pixmap(32, 32))
+        logo_text = QLabel(APP_NAME)
+        logo_text.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        logo_text.setStyleSheet("color: #0078D4;")
+        
+        logo_layout.addWidget(logo_icon)
+        logo_layout.addWidget(logo_text)
+        logo_layout.addStretch()
+        
+        layout.addLayout(logo_layout)
+        layout.addSpacing(20)
+        
+        # Main menu
+        self.menu_buttons = []
+        menu_items = [
+            ("🏠 Home", self.show_home_page),
+            ("📶 Ping", self.show_ping_page),
+            ("🌐 Network", self.show_network_page),
+            ("🧩 Addons", self.show_addons_page)
+        ]
+        
+        for text, callback in menu_items:
+            btn = QPushButton(text)
+            btn.clicked.connect(callback)
+            btn.setStyleSheet("text-align: left; padding: 8px;")
+            self.menu_buttons.append(btn)
+            layout.addWidget(btn)
+        
+        # Addons menu
+        self.addons_menu_label = QLabel("Your Addons")
+        self.addons_menu_label.setStyleSheet("color: #666; margin-top: 20px;")
+        layout.addWidget(self.addons_menu_label)
+        
+        self.addons_buttons = {}
+        layout.addStretch()
+        
+        # User info
+        self.user_label = QLabel("Guest")
+        self.login_btn = QPushButton("Login")
+        self.login_btn.clicked.connect(self.toggle_login)
+        
+        layout.addWidget(self.user_label)
+        layout.addWidget(self.login_btn)
+        
+        sidebar.setLayout(layout)
+        self.main_layout.addWidget(sidebar)
+        
+        sidebar.setStyleSheet("""
+            QWidget#sidebar {
+                background: #f3f3f3;
+                border-right: 1px solid #e0e0e0;
+            }
+            QPushButton {
+                border: none;
+                padding: 8px 15px;
+                text-align: left;
+            }
+            QPushButton:hover {
+                background: #e0e0e0;
+                border-radius: 4px;
+            }
+        """)
+    
+    def create_content_area(self):
+        self.content_area = QWidget()
+        self.content_area.setObjectName("contentArea")
+        
+        self.content_layout = QVBoxLayout()
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_area.setLayout(self.content_layout)
+        
+        # Header
+        self.header = QWidget()
+        self.header.setFixedHeight(60)
+        self.header.setObjectName("header")
+        
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(20, 0, 20, 0)
+        
+        self.page_title = QLabel("Home")
+        self.page_title.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        
+        # Notification button
+        self.notif_btn = QToolButton()
+        self.notif_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation))
+        self.notif_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        
+        notif_menu = QMenu()
+        notif_menu.addAction("No new notifications")
+        self.notif_btn.setMenu(notif_menu)
+        
+        # Settings button
+        self.settings_btn = QToolButton()
+        self.settings_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
+        self.settings_btn.clicked.connect(self.show_settings)
+        
+        header_layout.addWidget(self.page_title)
+        header_layout.addStretch()
+        header_layout.addWidget(self.notif_btn)
+        header_layout.addWidget(self.settings_btn)
+        
+        self.header.setLayout(header_layout)
+        self.content_layout.addWidget(self.header)
+        
+        # Stacked widget for pages
+        self.stacked_widget = QStackedWidget()
+        self.content_layout.addWidget(self.stacked_widget)
+        
+        # Create core pages
+        self.create_home_page()
+        self.create_ping_page()
+        self.create_network_page()
+        self.create_addons_page()
+        
+        # Apply styles
+        self.header.setStyleSheet("""
+            QWidget#header {
+                background: white;
+                border-bottom: 1px solid #e0e0e0;
+            }
+            QToolButton {
+                border: none;
+                padding: 5px;
+            }
+            QToolButton:hover {
+                background: #e0e0e0;
+                border-radius: 15px;
+            }
+        """)
+    
+    def create_home_page(self):
+        self.home_page = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(30, 30, 30, 30)
+        
+        welcome = QLabel(f"Welcome to {APP_NAME}")
+        welcome.setFont(QFont("Segoe UI", 24, QFont.Weight.Bold))
+        
+        # Addons cards
+        addons_label = QLabel("Your Addons")
+        addons_label.setFont(QFont("Segoe UI", 14))
+        
+        self.addons_grid = QHBoxLayout()
+        self.update_addons_cards()
+        
+        layout.addWidget(welcome)
+        layout.addWidget(addons_label)
+        layout.addLayout(self.addons_grid)
+        layout.addStretch()
+        
+        self.home_page.setLayout(layout)
+        self.stacked_widget.addWidget(self.home_page)
+    
+    def update_addons_cards(self):
+        # Clear existing cards
+        for i in reversed(range(self.addons_grid.count())):
+            widget = self.addons_grid.itemAt(i).widget()
+            if widget:
+                widget.deleteLater()
+        
+        # Add cards for active addons
+        for name, addon in self.addons_manager.active_addons.items():
+            card = QPushButton(name)
+            card.setIcon(QIcon(addon.icon))
+            card.setStyleSheet("""
+                QPushButton {
+                    padding: 15px;
+                    border-radius: 8px;
+                    border: 1px solid #e0e0e0;
+                    text-align: center;
+                    min-width: 120px;
+                }
+                QPushButton:hover {
+                    border: 1px solid #0078D4;
+                }
+            """)
+            card.clicked.connect(lambda _, n=name: self.show_addon(n))
+            self.addons_grid.addWidget(card)
+    
+    def create_ping_page(self):
+        page = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(30, 30, 30, 30)
+        
+        title = QLabel("Ping Tool")
+        title.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
+        
+        # Ping input
+        input_layout = QHBoxLayout()
+        self.ping_input = QLineEdit()
+        self.ping_input.setPlaceholderText("Enter IP or domain...")
+        
+        self.ping_btn = QPushButton("Execute Ping")
+        self.ping_btn.setStyleSheet("""
+            QPushButton {
+                background: #4CAF50;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background: #45a049;
+            }
+        """)
+        self.ping_btn.clicked.connect(self.execute_ping)
+        
+        input_layout.addWidget(self.ping_input)
+        input_layout.addWidget(self.ping_btn)
+        
+        # Results
+        self.ping_results = QTextEdit()
+        self.ping_results.setReadOnly(True)
+        
+        layout.addWidget(title)
+        layout.addLayout(input_layout)
+        layout.addWidget(self.ping_results)
+        
+        page.setLayout(layout)
+        self.stacked_widget.addWidget(page)
+    
+    def create_network_page(self):
+        page = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(30, 30, 30, 30)
+        
+        title = QLabel("Network Analysis")
+        title.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
+        
+        # Network tools
+        tools = [
+            ("IP Config", self.show_ip_config),
+            ("Test Connection", self.test_connection),
+            ("Network Stats", self.show_network_stats)
+        ]
+        
+        for text, callback in tools:
+            btn = QPushButton(text)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: #2196F3;
+                    color: white;
+                    border: none;
+                    padding: 8px 16px;
+                    border-radius: 4px;
+                    margin-bottom: 10px;
+                }
+                QPushButton:hover {
+                    background: #0b7dda;
+                }
+            """)
+            btn.clicked.connect(callback)
+            layout.addWidget(btn)
+        
+        # Results
+        self.network_results = QTextEdit()
+        self.network_results.setReadOnly(True)
+        
+        layout.addWidget(title)
+        layout.addWidget(self.network_results)
+        
+        page.setLayout(layout)
+        self.stacked_widget.addWidget(page)
+    
+    def create_addons_page(self):
+        page = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(30, 30, 30, 30)
+        
+        title = QLabel("Addons Manager")
+        title.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
+        
+        btn = QPushButton("Open Addons Store")
+        btn.setStyleSheet("""
+            QPushButton {
+                background: #9C27B0;
+                color: white;
+                border: none;
+                padding: 12px 24px;
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background: #7B1FA2;
+            }
+        """)
+        btn.clicked.connect(self.show_addons_store)
+        
+        layout.addWidget(title)
+        layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch()
+        
+        page.setLayout(layout)
+        self.stacked_widget.addWidget(page)
+    
+    def show_addons_store(self):
+        dialog = AddonsStore(self)
+        dialog.exec()
+    
+    def update_addons_menu(self):
+        # Clear existing addons buttons
+        for btn in self.addons_buttons.values():
+            btn.deleteLater()
+        self.addons_buttons.clear()
+        
+        # Add buttons for active addons
+        layout = self.sidebar().layout()
+        for name, addon in self.addons_manager.active_addons.items():
+            btn = QPushButton(f"🧩 {name}")
+            btn.setStyleSheet("text-align: left; padding: 8px; color: #9C27B0;")
+            btn.clicked.connect(lambda _, n=name: self.show_addon(n))
+            self.addons_buttons[name] = btn
+            layout.insertWidget(layout.indexOf(self.addons_menu_label) + 1, btn)
+        
+        # Update home page cards
+        self.update_addons_cards()
+    
+    def show_addon(self, addon_name):
+        if addon_name not in self.addons_ui:
+            ui = self.addons_manager.get_addon_ui(addon_name)
+            if ui:
+                self.addons_ui[addon_name] = ui
+                self.stacked_widget.addWidget(ui)
+        
+        if addon_name in self.addons_ui:
+            self.stacked_widget.setCurrentWidget(self.addons_ui[addon_name])
+            self.page_title.setText(addon_name)
+    
+    def toggle_login(self):
+        if self.user_label.text() == "Guest":
+            self.user_label.setText("Admin")
+            self.login_btn.setText("Logout")
+            self.notification_system("Login", "Welcome back, Admin!")
+        else:
+            self.user_label.setText("Guest")
+            self.login_btn.setText("Login")
+    
+    def show_settings(self):
+        QMessageBox.information(self, "Settings", "Application settings would appear here")
+    
+    # Network functions
+    def execute_ping(self):
+        target = self.ping_input.text().strip()
+        if not target:
+            self.ping_results.setPlainText("Please enter a target")
+            return
+        
+        self.ping_results.setPlainText(f"Pinging {target}...\n")
+        
+        try:
+            result = subprocess.run(
+                ['ping', '-n', '4', target], 
+                capture_output=True, 
+                text=True
+            )
+            self.ping_results.append(result.stdout)
+        except Exception as e:
+            self.ping_results.append(f"Error: {str(e)}")
+    
+    def show_ip_config(self):
+        try:
+            result = subprocess.run(
+                ['ipconfig', '/all'], 
+                capture_output=True, 
+                text=True
+            )
+            self.network_results.setPlainText(result.stdout)
+        except Exception as e:
+            self.network_results.setPlainText(f"Error: {str(e)}")
+    
+    def test_connection(self):
+        self.network_results.setPlainText("Testing connection to 8.8.8.8...\n")
+        try:
+            result = subprocess.run(
+                ['ping', '-n', '2', '8.8.8.8'], 
+                capture_output=True, 
+                text=True
+            )
+            if "TTL=" in result.stdout:
+                self.network_results.append("✅ Connection successful\n")
+            else:
+                self.network_results.append("❌ Connection failed\n")
+            self.network_results.append(result.stdout)
+        except Exception as e:
+            self.network_results.append(f"Error: {str(e)}")
+    
+    def show_network_stats(self):
+        try:
+            result = subprocess.run(
+                ['netstat', '-e'], 
+                capture_output=True, 
+                text=True
+            )
+            self.network_results.setPlainText("Network statistics:\n\n" + result.stdout)
+        except Exception as e:
+            self.network_results.setPlainText(f"Error: {str(e)}")
+    
+    # Navigation
+    def show_home_page(self):
+        self.update_active_button(0)
+        self.page_title.setText("Home")
+        self.stacked_widget.setCurrentIndex(0)
+    
+    def show_ping_page(self):
+        self.update_active_button(1)
+        self.page_title.setText("Ping Tool")
+        self.stacked_widget.setCurrentIndex(1)
+    
+    def show_network_page(self):
+        self.update_active_button(2)
+        self.page_title.setText("Network Analysis")
+        self.stacked_widget.setCurrentIndex(2)
+    
+    def show_addons_page(self):
+        self.update_active_button(3)
+        self.page_title.setText("Addons")
+        self.stacked_widget.setCurrentIndex(3)
+    
+    def update_active_button(self, index):
+        for i, btn in enumerate(self.menu_buttons):
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {'#E5F1FB' if i == index else 'transparent'};
+                    color: {'#0078D4' if i == index else 'inherit'};
+                    font-weight: {'bold' if i == index else 'normal'};
+                }}
+            """)
+    
+    def sidebar(self):
+        return self.main_layout.itemAt(0).widget()
+    
+    def closeEvent(self, event):
+        reply = QMessageBox.question(
+            self, 'Exit',
+            "Are you sure you want to quit?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            event.accept()
+        else:
+            event.ignore()
+
+# ==================== MAIN ====================
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setFont(QFont("Segoe UI", 10))
+    app.setStyle("Fusion")
+    
+    window = NexaHub()
+    window.show()
+    
+    sys.exit(app.exec())
+
